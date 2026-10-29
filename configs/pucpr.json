@@ -1,0 +1,21 @@
+{
+  "dataset": "PUCPR+",
+  "data_root": "data/raw/CARPK/PUCPR+_devkit/data",
+  "manifest_dir": "data/manifests/PUCPR+",
+  "output_dir": "outputs/pucpr_ffnet_seed42",
+  "seed": 42,
+  "pretrained": true,
+  "crop_size": 256,
+  "batch_size": 2,
+  "patch_batch_size": 1,
+  "workers": 2,
+  "epochs": 200,
+  "val_interval": 2,
+  "patience_validations": 15,
+  "lr": 0.00001,
+  "weight_decay": 0.0,
+  "wot": 0.1,
+  "wtv": 0.01,
+  "ot_regularization": 10.0,
+  "ot_iterations": 100
+}

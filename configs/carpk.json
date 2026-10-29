@@ -1,0 +1,22 @@
+{
+  "dataset": "CARPK",
+  "validation_protocol": "20161029_NTU_sequence_holdout",
+  "data_root": "data/raw/CARPK/CARPK_devkit/data",
+  "manifest_dir": "data/manifests/CARPK",
+  "output_dir": "outputs/carpk_ffnet_seed42",
+  "seed": 42,
+  "pretrained": true,
+  "crop_size": 256,
+  "batch_size": 2,
+  "patch_batch_size": 1,
+  "workers": 2,
+  "epochs": 150,
+  "val_interval": 5,
+  "patience_validations": 8,
+  "lr": 0.00001,
+  "weight_decay": 0.0,
+  "wot": 0.1,
+  "wtv": 0.01,
+  "ot_regularization": 10.0,
+  "ot_iterations": 100
+}
