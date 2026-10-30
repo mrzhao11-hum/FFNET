@@ -98,6 +98,7 @@ def main() -> None:
     model = build_model(
         pretrained=False, attention_norm=config.get("attention_norm", "batch"),
         fusion_mode=config.get("fusion_mode", "original"),
+        vehicle_variant=config.get("vehicle_variant", "baseline"),
     ).to(device)
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     state = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
@@ -115,6 +116,7 @@ def main() -> None:
         writer.writerows(rows)
     summary.update({"dataset": config["dataset"], "split": args.split,
                     "attention_norm": config.get("attention_norm", "batch"),
+                    "vehicle_variant": config.get("vehicle_variant", "baseline"),
                     "inference_mode": args.inference_mode,
                     "bn_batch_stats": args.bn_batch_stats,
                     "checkpoint": str(args.checkpoint)})

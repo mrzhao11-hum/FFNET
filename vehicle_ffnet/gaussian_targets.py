@@ -12,17 +12,16 @@ import math
 import numpy as np
 
 
-def gaussian_density_d8(
+def gaussian_density_image(
     points: np.ndarray,
     height: int,
     width: int,
     sigma: float = 8.0,
     truncate: float = 3.0,
-    stride: int = 8,
 ) -> np.ndarray:
-    """Return a [ceil(H/stride), ceil(W/stride)] target whose sum is #points."""
-    if height <= 0 or width <= 0 or sigma <= 0 or truncate <= 0 or stride <= 0:
-        raise ValueError("image size, sigma, truncate and stride must be positive")
+    """Original-image density; each boundary-clipped kernel integrates to one."""
+    if height <= 0 or width <= 0 or sigma <= 0 or truncate <= 0:
+        raise ValueError("image size, sigma and truncate must be positive")
     centers = np.asarray(points, dtype=np.float32).reshape(-1, 2)
     density = np.zeros((height, width), dtype=np.float32)
     radius = max(1, math.ceil(truncate * sigma))
@@ -40,11 +39,28 @@ def gaussian_density_d8(
         kernel /= np.float32(kernel.sum(dtype=np.float64))
         density[y_min:y_max + 1, x_min:x_max + 1] += kernel
 
+    return density
+
+
+def block_sum_density(density: np.ndarray, stride: int = 8) -> np.ndarray:
+    """Sum source pixels, including partial edge cells, without losing mass."""
+    if density.ndim != 2 or stride <= 0:
+        raise ValueError("expected a 2D density and positive stride")
+    height, width = density.shape
     rows = (height + stride - 1) // stride
     cols = (width + stride - 1) // stride
     padded = np.pad(density, ((0, rows * stride - height),
                               (0, cols * stride - width)))
     target = padded.reshape(rows, stride, cols, stride).sum(axis=(1, 3))
-    if not np.isclose(target.sum(dtype=np.float64), len(centers), atol=1e-3):
+    if not np.isclose(target.sum(dtype=np.float64), density.sum(dtype=np.float64),
+                      rtol=0, atol=1e-3):
         raise RuntimeError("Gaussian target lost vehicle mass")
     return target.astype(np.float32, copy=False)
+
+
+def gaussian_density_d8(points: np.ndarray, height: int, width: int,
+                        sigma: float = 8.0, truncate: float = 3.0,
+                        stride: int = 8) -> np.ndarray:
+    """Return a [ceil(H/stride), ceil(W/stride)] target whose sum is #points."""
+    return block_sum_density(
+        gaussian_density_image(points, height, width, sigma, truncate), stride)

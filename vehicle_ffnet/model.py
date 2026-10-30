@@ -67,14 +67,19 @@ def replace_ccsm_bn(model: nn.Module) -> int:
 
 
 def build_model(pretrained: bool = True, attention_norm: str = "batch",
-                fusion_mode: str = "original"):
+                fusion_mode: str = "original", vehicle_variant: str = "baseline"):
+    from .vehicle_modules import VEHICLE_VARIANTS, VehicleFFNet
+
     if attention_norm not in {"batch", "group", "group_all"}:
         raise ValueError(f"unsupported attention_norm: {attention_norm}")
     if fusion_mode not in {"original", "spatial_gate"}:
         raise ValueError(f"unsupported FFNet fusion mode: {fusion_mode}")
-    module, _ = upstream_modules()
-    if pretrained:
-        model = module.FFNet()
+    if vehicle_variant not in VEHICLE_VARIANTS:
+        raise ValueError(f"unsupported vehicle variant: {vehicle_variant}")
+    if vehicle_variant != "baseline" and fusion_mode != "original":
+        raise ValueError("vehicle variants require fusion_mode=original")
+
+    def configure(model):
         if attention_norm in {"group", "group_all"}:
             replace_pooled_attention_bn(model)
         if attention_norm == "group_all":
@@ -82,7 +87,13 @@ def build_model(pretrained: bool = True, attention_norm: str = "batch",
         if fusion_mode == "spatial_gate":
             from .spatial_gate import SpatialGateFusion
             model.fusion = SpatialGateFusion(model.fusion)
+        if vehicle_variant != "baseline":
+            model = VehicleFFNet(model, vehicle_variant)
         return model
+
+    module, _ = upstream_modules()
+    if pretrained:
+        return configure(module.FFNet())
     # Keep the official architecture but skip its hard-coded ImageNet download
     # for offline smoke tests and checkpoint evaluation.
     constructor = module.convnext_tiny
@@ -93,14 +104,6 @@ def build_model(pretrained: bool = True, attention_norm: str = "batch",
 
     module.convnext_tiny = without_weights
     try:
-        model = module.FFNet()
-        if attention_norm in {"group", "group_all"}:
-            replace_pooled_attention_bn(model)
-        if attention_norm == "group_all":
-            replace_ccsm_bn(model)
-        if fusion_mode == "spatial_gate":
-            from .spatial_gate import SpatialGateFusion
-            model.fusion = SpatialGateFusion(model.fusion)
-        return model
+        return configure(module.FFNet())
     finally:
         module.convnext_tiny = constructor

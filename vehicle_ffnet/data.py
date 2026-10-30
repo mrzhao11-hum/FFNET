@@ -7,6 +7,7 @@ import random
 from pathlib import Path
 
 import torch
+import numpy as np
 import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import Dataset
@@ -75,6 +76,9 @@ class VehicleDataset(Dataset):
         flip_probability: float = 0.5,
         limit: int | None = None,
         full_image: bool = False,
+        gaussian_target_root: str | Path | None = None,
+        gaussian_sigma: float = 8.0,
+        gaussian_truncate: float = 3.0,
     ) -> None:
         self.data_root = Path(data_root)
         document = json.loads(Path(manifest).read_text(encoding="utf-8"))
@@ -83,12 +87,22 @@ class VehicleDataset(Dataset):
         self.train = train
         self.flip_probability = flip_probability
         self.full_image = full_image
+        self.gaussian_target_root = Path(gaussian_target_root) if gaussian_target_root else None
+        self.gaussian_sigma = gaussian_sigma
+        self.gaussian_truncate = gaussian_truncate
+        if self.gaussian_target_root is not None and (not train or not full_image):
+            raise ValueError("H5 density targets require full-image training")
         if limit is not None:
             self.records = self.records[:limit]
         if not self.records:
             raise ValueError(f"empty manifest: {manifest}")
         if crop_size % 32:
             raise ValueError("official FFNet requires crop size divisible by 32")
+        if self.gaussian_target_root is not None:
+            for record in self.records:
+                path = self.gaussian_target_root / f"{record['id']}.h5"
+                if not path.is_file():
+                    raise FileNotFoundError(f"missing Gaussian GT: {path}; run prepare_gaussian_h5")
 
     def __len__(self) -> int:
         return len(self.records)
@@ -105,10 +119,22 @@ class VehicleDataset(Dataset):
 
         width, height = image.size
         if self.full_image:
+            density = None
+            if self.gaussian_target_root is not None:
+                from .prepare_gaussian_h5 import load_gaussian_h5
+                density = load_gaussian_h5(
+                    self.gaussian_target_root / f"{record['id']}.h5", points.numpy(),
+                    height, width, self.gaussian_sigma, self.gaussian_truncate)
             if random.random() < self.flip_probability:
                 image = TF.hflip(image)
                 points[:, 0] = width - 1 - points[:, 0]
-            target = discrete_map_rect(points, height, width)
+                if density is not None:
+                    density = np.flip(density, axis=1).copy()
+            if density is None:
+                target = discrete_map_rect(points, height, width)
+            else:
+                from .gaussian_targets import block_sum_density
+                target = torch.from_numpy(block_sum_density(density))[None]
             normalized = normalize_image(image)
             padded_height = (height + 31) // 32 * 32
             padded_width = (width + 31) // 32 * 32

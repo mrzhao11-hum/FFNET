@@ -3,3 +3,4 @@
 numpy
 Pillow
 scipy
+h5py

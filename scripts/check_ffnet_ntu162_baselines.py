@@ -36,7 +36,7 @@ def main() -> None:
             pml["pml_count_weight"]) != (0.1, 0.01, 1.0, 0.0):
         raise ValueError("unexpected loss weights or PML mass target")
     if (ot["epochs"], ot["batch_size"], ot["train_mode"], ot["attention_norm"],
-            ot["weight_decay"]) != (200, 1, "full", "group_all", 0.0):
+            ot["weight_decay"]) != (200, 1, "full", "group_all", 0.005):
         raise ValueError("unexpected baseline training protocol")
 
     manifest_dir = ROOT / ot["manifest_dir"]

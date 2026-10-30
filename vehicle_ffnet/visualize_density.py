@@ -217,6 +217,7 @@ def main() -> None:
         model = build_model(
             pretrained=False, attention_norm=config["attention_norm"],
             fusion_mode=config.get("fusion_mode", "original"),
+            vehicle_variant=config.get("vehicle_variant", "baseline"),
         ).to(device)
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         state = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint

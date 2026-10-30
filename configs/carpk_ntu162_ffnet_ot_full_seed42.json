@@ -18,7 +18,7 @@
   "val_interval": 1,
   "patience_validations": 30,
   "lr": 1e-5,
-  "weight_decay": 0.0,
+  "weight_decay": 0.005,
   "wot": 0.1,
   "wtv": 0.01,
   "ot_regularization": 10.0,

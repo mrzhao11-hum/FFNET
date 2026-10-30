@@ -33,6 +33,7 @@ def main() -> None:
     model = build_model(
         pretrained=False, attention_norm=config["attention_norm"],
         fusion_mode=config.get("fusion_mode", "original"),
+        vehicle_variant=config.get("vehicle_variant", "baseline"),
     ).to(device)
     saved = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     model.load_state_dict(saved.get("model_state_dict", saved), strict=True)
@@ -51,11 +52,18 @@ def main() -> None:
         points = box_centers(boxes).numpy()
         if len(points) != record["count"]:
             raise ValueError(f"count mismatch for {record['id']}")
-        gt = torch.as_tensor(
-            gaussian_density_d8(points, height, width,
-                                sigma=config.get("gaussian_sigma", 8.0)),
-            device=device,
-        )[None, None]
+        if config.get("gaussian_target_source") == "h5":
+            from .prepare_gaussian_h5 import load_gaussian_h5
+            from .gaussian_targets import block_sum_density
+            full_gt = load_gaussian_h5(
+                Path(config["gaussian_target_root"]) / f"{record['id']}.h5", points,
+                height, width, config.get("gaussian_sigma", 8.0),
+                config.get("gaussian_truncate", 3.0))
+            target = block_sum_density(full_gt)
+        else:
+            target = gaussian_density_d8(points, height, width,
+                                         sigma=config.get("gaussian_sigma", 8.0))
+        gt = torch.as_tensor(target, device=device)[None, None]
         x = normalize_image(image).unsqueeze(0).to(device)
         padded_height = (height + 31) // 32 * 32
         padded_width = (width + 31) // 32 * 32
@@ -68,6 +76,8 @@ def main() -> None:
         ).abs()
         density_grad = torch.autograd.grad(density_loss, head, retain_graph=True)[0]
         count_grad = torch.autograd.grad(count_loss, head)[0]
+        if not (torch.isfinite(density_grad).all() and torch.isfinite(count_grad).all()):
+            raise FloatingPointError("nonfinite density/count gradient")
         density_norm = float(density_grad.norm().item())
         count_norm = float(count_grad.norm().item())
         ratio = count_norm / max(density_norm, 1e-12)

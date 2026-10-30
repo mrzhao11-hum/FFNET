@@ -61,7 +61,8 @@ def compute_loss(model, criterion, images, points, gt_discrete, wot: float, wtv:
                  valid_shape: tuple[int, int] | None = None, supervision: str = "ot",
                  pml_count_weight: float = 0.0, gaussian_sigma: float = 8.0,
                  gaussian_density_weight: float = 1.0,
-                 gaussian_count_weight: float = 0.002):
+                 gaussian_count_weight: float = 0.002,
+                 gaussian_target_source: str = "online"):
     prediction, normalized = model(images)
     if valid_shape is not None:
         prediction = prediction[:, :, :valid_shape[0], :valid_shape[1]]
@@ -72,17 +73,26 @@ def compute_loss(model, criterion, images, points, gt_discrete, wot: float, wtv:
     predicted_counts = prediction.flatten(1).sum(1)
     count_loss = F.l1_loss(predicted_counts, target_counts)
     if supervision == "gaussian":
-        from .gaussian_targets import gaussian_density_d8
+        if gaussian_target_source == "h5":
+            target_density = gt_discrete.to(dtype=prediction.dtype)
+            if (not torch.isfinite(target_density).all() or (target_density < 0).any()
+                    or not torch.allclose(target_density.flatten(1).sum(1), target_counts,
+                                          rtol=0, atol=1e-3)):
+                raise ValueError("H5 target lost mass or contains invalid density")
+        elif gaussian_target_source == "online":
+            from .gaussian_targets import gaussian_density_d8
 
-        rows, cols = prediction.shape[-2:]
-        target_maps = np.stack([
-            gaussian_density_d8(item.detach().cpu().numpy(), rows * 8, cols * 8,
-                                sigma=gaussian_sigma)
-            for item in points
-        ])
-        target_density = torch.as_tensor(
-            target_maps[:, None], device=prediction.device, dtype=prediction.dtype
-        )
+            rows, cols = prediction.shape[-2:]
+            target_maps = np.stack([
+                gaussian_density_d8(item.detach().cpu().numpy(), rows * 8, cols * 8,
+                                    sigma=gaussian_sigma)
+                for item in points
+            ])
+            target_density = torch.as_tensor(
+                target_maps[:, None], device=prediction.device, dtype=prediction.dtype
+            )
+        else:
+            raise ValueError(f"unknown Gaussian target source: {gaussian_target_source}")
         density_sse = (prediction - target_density).square().flatten(1).sum(1).mean()
         weighted_density = gaussian_density_weight * density_sse
         total = weighted_density + gaussian_count_weight * count_loss
@@ -131,6 +141,7 @@ def train_epoch(model, loader, optimizer, criterion, config: dict, device: torch
             gaussian_sigma=config.get("gaussian_sigma", 8.0),
             gaussian_density_weight=config.get("gaussian_density_weight", 1.0),
             gaussian_count_weight=config.get("gaussian_count_weight", 0.002),
+            gaussian_target_source=config.get("gaussian_target_source", "online"),
         )
         if not torch.isfinite(total):
             raise FloatingPointError("nonfinite FFNet training loss")
@@ -191,6 +202,12 @@ def main() -> None:
             or config.get("gaussian_count_weight", 0.002) < 0):
         raise ValueError("Gaussian sigma/density weight must be positive; count weight nonnegative")
     train_mode = config.get("train_mode", "crop")
+    gaussian_source = config.get("gaussian_target_source", "online")
+    if gaussian_source not in {"online", "h5"}:
+        raise ValueError("gaussian_target_source must be online or h5")
+    if gaussian_source == "h5" and (supervision != "gaussian" or train_mode != "full"
+                                     or not config.get("gaussian_target_root")):
+        raise ValueError("H5 targets require Gaussian full-image training and gaussian_target_root")
     if train_mode not in {"crop", "full"}:
         raise ValueError(f"unsupported train_mode: {train_mode}")
     attention_norm = config.get("attention_norm", "batch")
@@ -221,14 +238,17 @@ def main() -> None:
                 "ot_iterations", "train_split", "val_interval", "patience_validations",
                 "attention_norm",
                 "train_mode", "ot_reference_size",
-                "supervision", "fusion_mode", "pml_radius", "pml_density_factor",
+                "supervision", "fusion_mode", "vehicle_variant", "pml_radius", "pml_density_factor",
                 "pml_count_weight", "gaussian_sigma", "gaussian_density_weight",
                 "gaussian_count_weight",
+                "gaussian_target_source", "gaussian_target_root", "gaussian_truncate",
             )
             defaults = {"supervision": "ot", "fusion_mode": "original",
+                        "vehicle_variant": "baseline",
                         "pml_radius": 32.0, "pml_density_factor": 1.0,
                         "pml_count_weight": 0.0, "gaussian_sigma": 8.0,
-                        "gaussian_density_weight": 1.0, "gaussian_count_weight": 0.002}
+                        "gaussian_density_weight": 1.0, "gaussian_count_weight": 0.002,
+                        "gaussian_target_source": "online", "gaussian_truncate": 3.0}
             changed = [key for key in fixed_keys
                        if previous.get(key, defaults.get(key)) != config.get(key, defaults.get(key))]
             if changed:
@@ -242,6 +262,9 @@ def main() -> None:
     train_set = VehicleDataset(
         data_root, manifest_dir / f"{args.train_split}.json", crop_size=config["crop_size"], train=True,
         limit=args.limit, full_image=train_mode == "full",
+        gaussian_target_root=config.get("gaussian_target_root") if gaussian_source == "h5" else None,
+        gaussian_sigma=config.get("gaussian_sigma", 8.0),
+        gaussian_truncate=config.get("gaussian_truncate", 3.0),
     )
     val_manifest = manifest_dir / "val.json"
     train_loader = DataLoader(
@@ -256,6 +279,7 @@ def main() -> None:
         pretrained=config["pretrained"] and args.resume is None,
         attention_norm=config.get("attention_norm", "batch"),
         fusion_mode=fusion_mode,
+        vehicle_variant=config.get("vehicle_variant", "baseline"),
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr"], weight_decay=config["weight_decay"])
     if supervision == "pml":
@@ -301,10 +325,17 @@ def main() -> None:
           f"input={'full' if train_mode == 'full' else config['crop_size']} "
           f"batch={config['batch_size']} seed={config['seed']} "
           f"pretrained={config['pretrained']} attention_norm={config.get('attention_norm', 'batch')} "
-          f"train_mode={train_mode} fusion={fusion_mode} supervision={supervision} "
+          f"train_mode={train_mode} fusion={fusion_mode} "
+          f"vehicle_variant={config.get('vehicle_variant', 'baseline')} supervision={supervision} "
           f"early_stop={not args.no_early_stop and config['patience_validations'] > 0} "
           f"patience={config['patience_validations']} "
           f"weight_decay={config['weight_decay']} device={device}", flush=True)
+    if supervision == "gaussian":
+        print(f"Gaussian GT={gaussian_source} root={config.get('gaussian_target_root', 'memory')} "
+              f"sigma={config.get('gaussian_sigma', 8.0)} stride=8 "
+              f"density_reduction=batch_mean_sum "
+              f"density_weight={config.get('gaussian_density_weight', 1.0)} "
+              f"count_L1_weight={config.get('gaussian_count_weight', 0.002)}", flush=True)
     with history_path.open("a" if append else "w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(
             stream, fieldnames=(

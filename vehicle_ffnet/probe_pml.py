@@ -14,6 +14,7 @@ from .data import VehicleDataset
 from .model import build_model
 from .pml_loss import ProximalMappingLoss
 from .train import compute_loss, set_seed
+from .vehicle_modules import ScaleGateFusion, VehicleFTM
 
 
 def main() -> None:
@@ -42,6 +43,7 @@ def main() -> None:
     model = build_model(
         pretrained=config["pretrained"], attention_norm=config["attention_norm"],
         fusion_mode=config.get("fusion_mode", "original"),
+        vehicle_variant=config.get("vehicle_variant", "baseline"),
     ).to(device)
     model.train()
     criterion = ProximalMappingLoss(
@@ -70,6 +72,21 @@ def main() -> None:
         gradient_norm += float(parameter.grad.abs().sum().item())
     if not math.isfinite(gradient_norm) or gradient_norm <= 0:
         raise RuntimeError("PML probe produced no usable model gradient")
+    module_gradients = {}
+    if getattr(model, "lde", None) is not None:
+        module_gradients["f4_detail"] = model.lde.project[0].weight.grad
+        module_gradients["f4_gate"] = model.lde.gate[-1].weight.grad
+    if isinstance(model.ccsm1, VehicleFTM):
+        module_gradients["f8_expert"] = model.ccsm1.experts[0][0].weight.grad
+        module_gradients["f8_route"] = model.ccsm1.route[-1].weight.grad
+    if isinstance(model.fusion, ScaleGateFusion):
+        module_gradients["scale_route"] = model.fusion.route[-1].weight.grad
+    measured = {}
+    for name, gradient in module_gradients.items():
+        norm = 0.0 if gradient is None else float(gradient.abs().sum().item())
+        if not math.isfinite(norm) or norm <= 0:
+            raise RuntimeError(f"PML probe found no usable gradient in {name}")
+        measured[name] = norm
     torch.cuda.synchronize(device)
     elapsed = time.perf_counter() - started
     peak_gib = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
@@ -85,6 +102,9 @@ def main() -> None:
         f"elapsed={elapsed:.2f}s",
         flush=True,
     )
+    if measured:
+        print("new_module_grad_L1=" + ", ".join(f"{key}:{value:.4g}"
+                                                   for key, value in measured.items()), flush=True)
 
 
 if __name__ == "__main__":
