@@ -21,11 +21,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--no-pretrained", action="store_true")
     args = parser.parse_args()
 
     config = json.loads(args.config.read_text(encoding="utf-8"))
     if config.get("supervision") != "pml" or config.get("train_mode") != "full":
         raise ValueError("probe requires a full-image PML training config")
+    stride = config.get("output_stride", 8)
     device = torch.device(args.device)
     if device.type != "cuda" or not torch.cuda.is_available():
         raise RuntimeError("the PML memory probe requires a visible CUDA device")
@@ -36,18 +38,25 @@ def main() -> None:
     record = records[index]
     dataset = VehicleDataset(
         config["data_root"], train_manifest, crop_size=config["crop_size"],
-        train=True, flip_probability=0.0, full_image=True,
+        train=True, flip_probability=0.0, full_image=True, output_stride=stride,
     )
     image, points, target, valid_shape = dataset[index]
     set_seed(config["seed"])
     model = build_model(
-        pretrained=config["pretrained"], attention_norm=config["attention_norm"],
+        pretrained=config["pretrained"] and not args.no_pretrained, attention_norm=config["attention_norm"],
         fusion_mode=config.get("fusion_mode", "original"),
         vehicle_variant=config.get("vehicle_variant", "baseline"),
+        density_activation=config.get("density_activation", "relu"),
     ).to(device)
+    if model.output_stride != stride:
+        raise ValueError("model/config stride mismatch")
+    if config.get("density_head_init") == "train_mean_mass_relu":
+        from .model import initialize_density_head
+        mean = sum(r["count"] / (((r["height"]+stride-1)//stride)*((r["width"]+stride-1)//stride)) for r in records)/len(records)
+        initialize_density_head(model, mean, config.get("density_head_weight_std", 1e-5), allow_relu=True)
     model.train()
     criterion = ProximalMappingLoss(
-        stride=8, radius_px=config["pml_radius"],
+        stride=stride, radius_px=config["pml_radius"],
         density_factor=config["pml_density_factor"],
     )
     images = image.unsqueeze(0).to(device)
@@ -81,6 +90,15 @@ def main() -> None:
         module_gradients["f8_route"] = model.ccsm1.route[-1].weight.grad
     if isinstance(model.fusion, ScaleGateFusion):
         module_gradients["scale_route"] = model.fusion.route[-1].weight.grad
+    detail = getattr(model, "late_detail", None)
+    if detail is not None:
+        module_gradients["late_f4_detail"] = detail.local[0].weight.grad
+        if hasattr(detail, "gate"):
+            module_gradients["late_f4_gate"] = detail.gate[-1].weight.grad
+    if model.output_stride == 4:
+        module_gradients["d4_semantic"] = model.fusion.semantic[0].weight.grad
+        module_gradients["d4_detail"] = model.fusion.local[0].weight.grad
+        module_gradients["d4_gate"] = model.fusion.gate[-1].weight.grad
     measured = {}
     for name, gradient in module_gradients.items():
         norm = 0.0 if gradient is None else float(gradient.abs().sum().item())
@@ -93,7 +111,7 @@ def main() -> None:
     cells = valid_shape[0] * valid_shape[1]
     print(
         f"PML probe passed: id={record['id']} GT={len(points)} "
-        f"D8={valid_shape[0]}x{valid_shape[1]} distance_matrix={cells}x{len(points)} "
+        f"D{stride}={valid_shape[0]}x{valid_shape[1]} distance_matrix={cells}x{len(points)} "
         f"prediction={float(predicted.item()):.3f} "
         f"loss={float(total.item()):.4f} "
         f"point={float(terms[4].item()):.4f} "

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import math
 from pathlib import Path
 
 import torch
@@ -67,17 +68,24 @@ def replace_ccsm_bn(model: nn.Module) -> int:
 
 
 def build_model(pretrained: bool = True, attention_norm: str = "batch",
-                fusion_mode: str = "original", vehicle_variant: str = "baseline"):
+                fusion_mode: str = "original", vehicle_variant: str = "baseline",
+                density_activation: str = "relu"):
     from .vehicle_modules import VEHICLE_VARIANTS, VehicleFFNet
+    from .detail_resolution import DETAIL_VARIANTS, DetailResolutionFFNet
+    from .fusion_modules import FUSION_MODES, CollaborativeFusion
+    if density_activation not in {"relu", "softplus"}:
+        raise ValueError(f"unsupported density activation: {density_activation}")
 
     if attention_norm not in {"batch", "group", "group_all"}:
         raise ValueError(f"unsupported attention_norm: {attention_norm}")
-    if fusion_mode not in {"original", "spatial_gate"}:
+    if fusion_mode not in {"original", "spatial_gate", *FUSION_MODES}:
         raise ValueError(f"unsupported FFNet fusion mode: {fusion_mode}")
-    if vehicle_variant not in VEHICLE_VARIANTS:
+    if vehicle_variant not in {*VEHICLE_VARIANTS, *DETAIL_VARIANTS}:
         raise ValueError(f"unsupported vehicle variant: {vehicle_variant}")
-    if vehicle_variant != "baseline" and fusion_mode != "original":
-        raise ValueError("vehicle variants require fusion_mode=original")
+    joint_allowed = (vehicle_variant in {"b1_detail", "b3_semantic_gate"}
+                     and fusion_mode in {"c1_channel", "c2_spatial"})
+    if vehicle_variant != "baseline" and fusion_mode != "original" and not joint_allowed:
+        raise ValueError("vehicle variants require fusion_mode=original except B1/B3 + C1/C2 joints")
 
     def configure(model):
         if attention_norm in {"group", "group_all"}:
@@ -87,8 +95,15 @@ def build_model(pretrained: bool = True, attention_norm: str = "batch",
         if fusion_mode == "spatial_gate":
             from .spatial_gate import SpatialGateFusion
             model.fusion = SpatialGateFusion(model.fusion)
-        if vehicle_variant != "baseline":
+        elif fusion_mode in FUSION_MODES:
+            model.fusion = CollaborativeFusion(model.fusion, fusion_mode)
+        if vehicle_variant in DETAIL_VARIANTS:
+            model = DetailResolutionFFNet(model, vehicle_variant)
+        elif vehicle_variant != "baseline":
             model = VehicleFFNet(model, vehicle_variant)
+        model.output_stride = getattr(model, "output_stride", 8)
+        if density_activation == "softplus":
+            model.fusion.final[1] = nn.Softplus()
         return model
 
     module, _ = upstream_modules()
@@ -107,3 +122,20 @@ def build_model(pretrained: bool = True, attention_norm: str = "batch",
         return configure(module.FFNet())
     finally:
         module.convnext_tiny = constructor
+
+
+def initialize_density_head(model, mean_cell_mass: float, weight_std: float = 0.001,
+                            allow_relu: bool = False):
+    """Calibrate a fresh head using training counts; ReLU needs explicit opt-in."""
+    if not isinstance(model.fusion.final[1], nn.Softplus) and not (
+            allow_relu and isinstance(model.fusion.final[1], nn.ReLU)):
+        raise ValueError("mass initialization requires a Softplus output")
+    if not math.isfinite(mean_cell_mass) or mean_cell_mass <= 0 or weight_std < 0:
+        raise ValueError("expected finite positive cell mass and nonnegative weight std")
+    head = model.fusion.final[0]
+    bias = (mean_cell_mass + math.log(-math.expm1(-mean_cell_mass))
+            if isinstance(model.fusion.final[1], nn.Softplus) else mean_cell_mass)
+    with torch.no_grad():
+        nn.init.normal_(head.weight, std=weight_std)
+        head.bias.fill_(bias)
+    return bias

@@ -1,0 +1,12 @@
+{
+  "scope": "Original official architecture and existing vehicle baseline, before B1-B3/D4 additions",
+  "official_source": "upstream/Fuss-Free-structure-main/Networks/FFNet.py",
+  "backbone": "ConvNeXt-Tiny",
+  "raw_features_stride_channels": [[4,96],[8,192],[16,384],[32,768]],
+  "original_FTM_outputs_stride_channels": [[8,16],[16,32],[32,64]],
+  "fusion": "Original learned transposed convolutions align T16/T32 to stride 8; concatenate 112 channels; 1x1 density head + ReLU",
+  "output_stride": 8,
+  "vehicle_baseline_adaptations": "group_all GN, full-image batch 1, point-supervised PML; no added vehicle module",
+  "split_train_val_test": [827,162,459],
+  "baseline_retrain_required": false
+}

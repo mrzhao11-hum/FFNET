@@ -1,0 +1,7 @@
+{
+  "vehicle_ffnet/model.py": "3479575ddf2d81034da4c7cd3517cfbfe78ef922e8cb1fd12d2380ae2c624331",
+  "vehicle_ffnet/vehicle_modules.py": "cef41abcabca165865b9b884a08b952971afe08973fd08677bfd22953fc3beec",
+  "configs/carpk_ntu162_ffnet_pml_full_seed42.json": "c99719b683431d18ab1d1db4168554f22fa01630176098694133248ed5a09c01",
+  "upstream/Fuss-Free-structure-main/Networks/FFNet.py": "9bad7817d2f13315d5ccefa096b6c666a55f9ddacad23a89c6e9dcc21ea1a082",
+  "upstream/Fuss-Free-structure-main/Networks/ODConv2d.py": "3f22afe32c547437a2b9019a821cccab4182959918ff0d1d5f9a35433f371e36"
+}

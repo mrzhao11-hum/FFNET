@@ -60,6 +60,7 @@ def main() -> None:
         pretrained=False, attention_norm=config.get("attention_norm", "batch"),
         fusion_mode=config.get("fusion_mode", "original"),
         vehicle_variant=config.get("vehicle_variant", "baseline"),
+        density_activation=config.get("density_activation", "relu"),
     ).to(device)
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     state = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint

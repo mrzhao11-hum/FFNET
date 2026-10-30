@@ -54,6 +54,8 @@ def main() -> None:
         parser.error("warmup must be nonnegative, steps positive, and val-samples nonnegative")
 
     config = json.loads(args.config.read_text(encoding="utf-8"))
+    if config.get("supervision", "ot") != "ot" or config.get("output_stride", 8) != 8:
+        parser.error("profile_full measures the original D8 OT path only; use probe_pml for PML memory/backward checks")
     if config.get("train_mode") != "full" or config["batch_size"] != 1:
         parser.error("this profiler requires a full-image, batch-one config")
     device = torch.device(args.device)
@@ -76,6 +78,7 @@ def main() -> None:
         pretrained=False, attention_norm=config["attention_norm"],
         fusion_mode=config.get("fusion_mode", "original"),
         vehicle_variant=config.get("vehicle_variant", "baseline"),
+        density_activation=config.get("density_activation", "relu"),
     ).to(device)
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     state = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint

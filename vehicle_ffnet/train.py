@@ -63,6 +63,9 @@ def compute_loss(model, criterion, images, points, gt_discrete, wot: float, wtv:
                  gaussian_density_weight: float = 1.0,
                  gaussian_count_weight: float = 0.002,
                  gaussian_target_source: str = "online"):
+    stride = getattr(model, "output_stride", 8)
+    if criterion is not None and getattr(criterion, "stride", stride) != stride:
+        raise ValueError("loss/model output stride mismatch")
     prediction, normalized = model(images)
     if valid_shape is not None:
         prediction = prediction[:, :, :valid_shape[0], :valid_shape[1]]
@@ -84,8 +87,8 @@ def compute_loss(model, criterion, images, points, gt_discrete, wot: float, wtv:
 
             rows, cols = prediction.shape[-2:]
             target_maps = np.stack([
-                gaussian_density_d8(item.detach().cpu().numpy(), rows * 8, cols * 8,
-                                    sigma=gaussian_sigma)
+                gaussian_density_d8(item.detach().cpu().numpy(), rows * stride, cols * stride,
+                                    sigma=gaussian_sigma, stride=stride)
                 for item in points
             ])
             target_density = torch.as_tensor(
@@ -193,6 +196,12 @@ def main() -> None:
     config["run_to_max_epochs"] = args.no_early_stop
     supervision = config.get("supervision", "ot")
     fusion_mode = config.get("fusion_mode", "original")
+    expected_stride = 4 if config.get("vehicle_variant") == "d4_detail" else 8
+    if config.get("output_stride", expected_stride) != expected_stride:
+        raise ValueError("config output_stride disagrees with vehicle variant")
+    output_stride = expected_stride
+    if "output_stride" in config or output_stride == 4:
+        config["output_stride"] = output_stride
     if supervision not in {"ot", "pml", "gaussian"}:
         raise ValueError(f"unsupported supervision: {supervision}")
     if config.get("pml_count_weight", 0.0) < 0:
@@ -242,13 +251,16 @@ def main() -> None:
                 "pml_count_weight", "gaussian_sigma", "gaussian_density_weight",
                 "gaussian_count_weight",
                 "gaussian_target_source", "gaussian_target_root", "gaussian_truncate",
+                "density_activation", "density_head_init", "density_head_weight_std", "output_stride",
             )
             defaults = {"supervision": "ot", "fusion_mode": "original",
                         "vehicle_variant": "baseline",
                         "pml_radius": 32.0, "pml_density_factor": 1.0,
                         "pml_count_weight": 0.0, "gaussian_sigma": 8.0,
                         "gaussian_density_weight": 1.0, "gaussian_count_weight": 0.002,
-                        "gaussian_target_source": "online", "gaussian_truncate": 3.0}
+                        "gaussian_target_source": "online", "gaussian_truncate": 3.0,
+                        "density_activation": "relu", "density_head_init": "original",
+                        "density_head_weight_std": 0.001, "output_stride": 8}
             changed = [key for key in fixed_keys
                        if previous.get(key, defaults.get(key)) != config.get(key, defaults.get(key))]
             if changed:
@@ -261,7 +273,7 @@ def main() -> None:
     data_root = Path(config["data_root"])
     train_set = VehicleDataset(
         data_root, manifest_dir / f"{args.train_split}.json", crop_size=config["crop_size"], train=True,
-        limit=args.limit, full_image=train_mode == "full",
+        limit=args.limit, full_image=train_mode == "full", output_stride=output_stride,
         gaussian_target_root=config.get("gaussian_target_root") if gaussian_source == "h5" else None,
         gaussian_sigma=config.get("gaussian_sigma", 8.0),
         gaussian_truncate=config.get("gaussian_truncate", 3.0),
@@ -280,25 +292,43 @@ def main() -> None:
         attention_norm=config.get("attention_norm", "batch"),
         fusion_mode=fusion_mode,
         vehicle_variant=config.get("vehicle_variant", "baseline"),
+        density_activation=config.get("density_activation", "relu"),
     ).to(device)
+    head_init = config.get("density_head_init", "original")
+    if model.output_stride != output_stride:
+        raise ValueError("model/config output stride mismatch")
+    if head_init not in {"original", "train_mean_mass", "train_mean_mass_relu"}:
+        raise ValueError(f"unsupported density_head_init: {head_init}")
+    if args.resume is None and head_init in {"train_mean_mass", "train_mean_mass_relu"}:
+        from .model import initialize_density_head
+        mean_mass = sum(r["count"] / (((r["height"] + output_stride - 1) // output_stride) * ((r["width"] + output_stride - 1) // output_stride))
+                        for r in train_set.records) / len(train_set.records)
+        bias = initialize_density_head(model, mean_mass,
+                                       config.get("density_head_weight_std", 0.001),
+                                       allow_relu=head_init == "train_mean_mass_relu")
+        config["density_initial_mass_per_cell"] = mean_mass
+        (output_dir / "resolved_config.json").write_text(json.dumps(config, indent=2) + "\n",
+                                                        encoding="utf-8")
+        print(f"Density head initialized: training_mean_cell_mass={mean_mass:.8f} "
+              f"bias={bias:.6f}", flush=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr"], weight_decay=config["weight_decay"])
     if supervision == "pml":
         from .pml_loss import ProximalMappingLoss
         criterion = ProximalMappingLoss(
-            stride=8, radius_px=config.get("pml_radius", 32.0),
+            stride=output_stride, radius_px=config.get("pml_radius", 32.0),
             density_factor=config.get("pml_density_factor", 1.0),
         )
     elif supervision == "gaussian":
         criterion = None
     elif train_mode == "full":
         criterion = RectangularOTLoss(
-            8, device, config["ot_iterations"], config["ot_regularization"],
+            output_stride, device, config["ot_iterations"], config["ot_regularization"],
             config.get("ot_reference_size", 256.0),
         )
     else:
         _, official_ot = upstream_modules()
         criterion = official_ot(
-            config["crop_size"], 8, 0, device, config["ot_iterations"], config["ot_regularization"]
+            config["crop_size"], output_stride, 0, device, config["ot_iterations"], config["ot_regularization"]
         )
     start_epoch = 1
     best_mae = float("inf")
@@ -326,14 +356,15 @@ def main() -> None:
           f"batch={config['batch_size']} seed={config['seed']} "
           f"pretrained={config['pretrained']} attention_norm={config.get('attention_norm', 'batch')} "
           f"train_mode={train_mode} fusion={fusion_mode} "
-          f"vehicle_variant={config.get('vehicle_variant', 'baseline')} supervision={supervision} "
+          f"vehicle_variant={config.get('vehicle_variant', 'baseline')} output_stride={output_stride} supervision={supervision} "
           f"early_stop={not args.no_early_stop and config['patience_validations'] > 0} "
           f"patience={config['patience_validations']} "
           f"weight_decay={config['weight_decay']} device={device}", flush=True)
     if supervision == "gaussian":
         print(f"Gaussian GT={gaussian_source} root={config.get('gaussian_target_root', 'memory')} "
-              f"sigma={config.get('gaussian_sigma', 8.0)} stride=8 "
+              f"sigma={config.get('gaussian_sigma', 8.0)} stride={output_stride} "
               f"density_reduction=batch_mean_sum "
+              f"activation={config.get('density_activation', 'relu')} "
               f"density_weight={config.get('gaussian_density_weight', 1.0)} "
               f"count_L1_weight={config.get('gaussian_count_weight', 0.002)}", flush=True)
     with history_path.open("a" if append else "w", newline="", encoding="utf-8") as stream:

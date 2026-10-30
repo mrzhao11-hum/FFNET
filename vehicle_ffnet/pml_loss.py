@@ -55,7 +55,7 @@ class ProximalMappingLoss(nn.Module):
                 if (not bool(torch.isfinite(point_xy).all())
                         or bool(((point_xy < 0) | (point_xy[:, 0:1] >= cols)
                                  | (point_xy[:, 1:2] >= rows)).any())):
-                    raise ValueError("PML point is outside the valid stride-8 density map")
+                    raise ValueError(f"PML point is outside the valid stride-{self.stride} density map")
             image_mass = flat.sum()
             if bool((image_mass.detach() <= self.density_factor).item()):
                 # The original implementation uses a global count fallback until

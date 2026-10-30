@@ -99,6 +99,7 @@ def main() -> None:
         pretrained=False, attention_norm=config.get("attention_norm", "batch"),
         fusion_mode=config.get("fusion_mode", "original"),
         vehicle_variant=config.get("vehicle_variant", "baseline"),
+        density_activation=config.get("density_activation", "relu"),
     ).to(device)
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     state = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
@@ -117,6 +118,8 @@ def main() -> None:
     summary.update({"dataset": config["dataset"], "split": args.split,
                     "attention_norm": config.get("attention_norm", "batch"),
                     "vehicle_variant": config.get("vehicle_variant", "baseline"),
+                    "fusion_mode": config.get("fusion_mode", "original"),
+                    "output_stride": model.output_stride,
                     "inference_mode": args.inference_mode,
                     "bn_batch_stats": args.bn_batch_stats,
                     "checkpoint": str(args.checkpoint)})

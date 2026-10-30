@@ -79,6 +79,7 @@ class VehicleDataset(Dataset):
         gaussian_target_root: str | Path | None = None,
         gaussian_sigma: float = 8.0,
         gaussian_truncate: float = 3.0,
+        output_stride: int = 8,
     ) -> None:
         self.data_root = Path(data_root)
         document = json.loads(Path(manifest).read_text(encoding="utf-8"))
@@ -87,6 +88,9 @@ class VehicleDataset(Dataset):
         self.train = train
         self.flip_probability = flip_probability
         self.full_image = full_image
+        if output_stride not in (4, 8):
+            raise ValueError("output_stride must be 4 or 8")
+        self.output_stride = output_stride
         self.gaussian_target_root = Path(gaussian_target_root) if gaussian_target_root else None
         self.gaussian_sigma = gaussian_sigma
         self.gaussian_truncate = gaussian_truncate
@@ -131,10 +135,10 @@ class VehicleDataset(Dataset):
                 if density is not None:
                     density = np.flip(density, axis=1).copy()
             if density is None:
-                target = discrete_map_rect(points, height, width)
+                target = discrete_map_rect(points, height, width, self.output_stride)
             else:
                 from .gaussian_targets import block_sum_density
-                target = torch.from_numpy(block_sum_density(density))[None]
+                target = torch.from_numpy(block_sum_density(density, self.output_stride))[None]
             normalized = normalize_image(image)
             padded_height = (height + 31) // 32 * 32
             padded_width = (width + 31) // 32 * 32
@@ -153,7 +157,7 @@ class VehicleDataset(Dataset):
         points = points - torch.tensor((left, top), dtype=torch.float32)
         inside = ((points >= 0) & (points < size)).all(dim=1)
         points = points[inside]
-        target = discrete_map(points, size)
+        target = discrete_map(points, size, self.output_stride)
         if random.random() > 1.0 - self.flip_probability:
             image = TF.hflip(image)
             points[:, 0] = size - 1 - points[:, 0]

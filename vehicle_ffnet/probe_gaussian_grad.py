@@ -23,6 +23,9 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--samples", type=int, default=5)
+    parser.add_argument("--split", choices=("train", "val"), default="train")
+    parser.add_argument("--require-live", action="store_true",
+                        help="fail if a nonempty sample predicts almost zero or both head gradients vanish")
     args = parser.parse_args()
     if args.samples < 1:
         parser.error("samples must be positive")
@@ -34,16 +37,21 @@ def main() -> None:
         pretrained=False, attention_norm=config["attention_norm"],
         fusion_mode=config.get("fusion_mode", "original"),
         vehicle_variant=config.get("vehicle_variant", "baseline"),
+        density_activation=config.get("density_activation", "relu"),
     ).to(device)
     saved = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     model.load_state_dict(saved.get("model_state_dict", saved), strict=True)
     model.eval()
+    stride = model.output_stride
     head = model.fusion.final[0].weight
     root = Path(config["data_root"])
     records = json.loads(
-        (Path(config["manifest_dir"]) / "train.json").read_text(encoding="utf-8")
+        (Path(config["manifest_dir"]) / f"{args.split}.json").read_text(encoding="utf-8")
     )["samples"]
     ratios = []
+    failed = []
+    print(f"activation={type(model.fusion.final[1]).__name__} "
+          f"head_bias={float(model.fusion.final[0].bias.detach().mean()):.6f}")
     for record in records[:args.samples]:
         with Image.open(root / record["image"]) as source:
             image = source.convert("RGB")
@@ -59,10 +67,10 @@ def main() -> None:
                 Path(config["gaussian_target_root"]) / f"{record['id']}.h5", points,
                 height, width, config.get("gaussian_sigma", 8.0),
                 config.get("gaussian_truncate", 3.0))
-            target = block_sum_density(full_gt)
+            target = block_sum_density(full_gt, stride)
         else:
             target = gaussian_density_d8(points, height, width,
-                                         sigma=config.get("gaussian_sigma", 8.0))
+                                         sigma=config.get("gaussian_sigma", 8.0), stride=stride)
         gt = torch.as_tensor(target, device=device)[None, None]
         x = normalize_image(image).unsqueeze(0).to(device)
         padded_height = (height + 31) // 32 * 32
@@ -82,10 +90,19 @@ def main() -> None:
         count_norm = float(count_grad.norm().item())
         ratio = count_norm / max(density_norm, 1e-12)
         ratios.append(ratio)
+        predicted_count = float(prediction.detach().sum())
+        active_fraction = float((prediction.detach() > 0).float().mean())
+        zero_sse = float(gt.square().sum())
+        if len(points) and (predicted_count < 0.01 or density_norm + count_norm == 0):
+            failed.append(record['id'])
         print(f"{record['id']} GT={len(points)} prediction={float(prediction.sum()):.2f} "
               f"density={float(density_loss):.4f} weighted_count={float(count_loss):.4f} "
-              f"head_grad_count/density={ratio:.3f}")
+              f"head_grad_count/density={ratio:.3f} "
+              f"active_fraction={active_fraction:.6f} zero_prediction_SSE={zero_sse:.4f} "
+              f"density_grad_norm={density_norm:.6g} count_grad_norm={count_norm:.6g}")
     print(f"median head gradient ratio: {statistics.median(ratios):.3f}")
+    if args.require_live and failed:
+        raise RuntimeError(f"near-zero output or dead head gradients on: {failed}")
 
 
 if __name__ == "__main__":
